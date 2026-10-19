@@ -203,14 +203,17 @@ type callEngine struct {
 	// gcExec is this call's registration with the store, and is nil unless the GC proposal is enabled.
 	gcPause uint32
 	gcExec  *wasm.GCExecution
+	// gcExecSlot is the storage gcExec points at while registered, kept here so a call does not allocate one.
+	gcExecSlot wasm.GCExecution
 }
 
 // ScanGCRoots implements wasm.GCRoots. Every operand and local this call holds lives in one flat []uint64, so
 // the whole of it is offered to the collector, which decides what looks like a reference.
-func (ce *callEngine) ScanGCRoots(visit func(uint64)) {
+func (ce *callEngine) ScanGCRoots(visit func(uint64)) bool {
 	for _, v := range ce.stack {
 		visit(v)
 	}
+	return true
 }
 
 // matchCatchClause checks whether a single catch clause matches the given exception.
@@ -663,7 +666,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 		}
 		compiled.source = module
 		compiled.ensureTermination = ensureTermination
-		compiled.gcEnabled = e.enabledFeatures.IsEnabled(api.CoreFeatureGC)
+		compiled.gcEnabled = wasm.CollectorEnabled(e.enabledFeatures)
 		compiled.listener = lsn
 		compiled.index = imported + uint32(i)
 	}
@@ -1251,7 +1254,7 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 	}
 
 	if ce.f.parent.gcEnabled {
-		ce.gcExec = m.RegisterGCExecution(ce, &ce.gcPause)
+		ce.gcExec = m.RegisterGCExecutionInto(&ce.gcExecSlot, ce, &ce.gcPause)
 		defer func() {
 			ce.gcExec.Unregister()
 			ce.gcExec = nil
