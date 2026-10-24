@@ -852,7 +852,7 @@ func TestReadComponentDecl(t *testing.T) {
 func TestReadComponenttype(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
 		buf := []byte{0x00} // count=0
-		off, err := readComponenttype(buf, 0)
+		_, off, err := readComponenttypeDesc(buf, 0)
 		if err != nil || off != 1 {
 			t.Errorf("off=%d err=%v, want 1,nil", off, err)
 		}
@@ -860,9 +860,9 @@ func TestReadComponenttype(t *testing.T) {
 
 	t.Run("one import decl", func(t *testing.T) {
 		buf := []byte{0x01, 0x03, 0x00, 0x01, 'x', 0x01, 0x00}
-		off, err := readComponenttype(buf, 0)
+		_, off, err := readComponenttypeDesc(buf, 0)
 		if err != nil {
-			t.Fatalf("readComponenttype: %v", err)
+			t.Fatalf("readComponenttypeDesc: %v", err)
 		}
 		if off != len(buf) {
 			t.Errorf("off=%d, want %d", off, len(buf))
@@ -870,7 +870,7 @@ func TestReadComponenttype(t *testing.T) {
 	})
 
 	t.Run("bad count", func(t *testing.T) {
-		_, err := readComponenttype(nil, 0)
+		_, _, err := readComponenttypeDesc(nil, 0)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -878,7 +878,7 @@ func TestReadComponenttype(t *testing.T) {
 
 	t.Run("propagates componentdecl error with index", func(t *testing.T) {
 		buf := []byte{0x02, 0x03, 0x00, 0x01, 'x', 0x01, 0x00, 0xff}
-		_, err := readComponenttype(buf, 0)
+		_, _, err := readComponenttypeDesc(buf, 0)
 		if err == nil || !strings.Contains(err.Error(), "componentdecl[1]") {
 			t.Errorf("got err=%v, want componentdecl[1] error", err)
 		}
@@ -1245,16 +1245,21 @@ func TestReadLabelTruncated(t *testing.T) {
 	})
 }
 
+// An empty label at the very end of the buffer has no byte to view.
+func TestReadLabelEmptyAtEnd(t *testing.T) {
+	if s, off, err := readLabel([]byte{0x00}, 0); s != "" || off != 1 || err != nil {
+		t.Fatalf("got %q, %d, %v", s, off, err)
+	}
+}
+
 // ---------------------------------------------------------------------
 // readDeftypeDesc: unsupported-construct and truncation paths not
 // otherwise reachable through a real wasm-tools fixture.
 // ---------------------------------------------------------------------
 
 func TestReadDeftypeDescUnsupportedTag(t *testing.T) {
-	// 0x67 is not a recognized defvaltype tag (valid tags are documented as
-	// 0x68..0x72 plus the primvaltype range and the 0x3f/0x40/0x41/0x42
-	// aggregate tags).
-	buf := []byte{0x67}
+	// 0x6c is not a defvaltype tag: it was union's, which the spec dropped.
+	buf := []byte{0x6c}
 	_, _, err := readDeftypeDesc(buf, 0)
 	if err == nil || !strings.Contains(err.Error(), "unsupported (M1)") {
 		t.Errorf("got err=%v, want unsupported (M1) defvaltype tag error", err)

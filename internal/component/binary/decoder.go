@@ -33,6 +33,9 @@ var (
 // It validates the preamble, iterates outer component sections, and decodes
 // type, import, and export sections into Go structs. Other sections are
 // recorded but not fully decoded.
+//
+// The decoded component's names are views of the buffer read (see
+// readLabel), which it keeps as Component.Bytes: nothing may write to it.
 func Decode(r io.Reader) (*Component, error) {
 	// Read the entire binary into memory for slice-based offset tracking.
 	// (Matching the pattern of the core wasm decoder.)
@@ -42,6 +45,13 @@ func Decode(r io.Reader) (*Component, error) {
 	}
 
 	return decodeComponent(buf)
+}
+
+// DecodeBytes is Decode of b. It copies b, once and to size, where
+// io.ReadAll would grow a buffer to it: the copy is the decoder's own, which
+// the names it decodes are views of, so b stays the caller's to change.
+func DecodeBytes(b []byte) (*Component, error) {
+	return decodeComponent(bytes.Clone(b))
 }
 
 func decodeComponent(buf []byte) (*Component, error) {
@@ -144,6 +154,10 @@ func decodeComponent(buf []byte) (*Component, error) {
 			// The enclosing link is what makes the nested component's
 			// `alias outer` definitions resolvable -- see Component.Outer.
 			nested.Outer = c
+			// Now that its outer aliases resolve, its types can be sized.
+			if err := nested.validateValueSizes(); err != nil {
+				return nil, fmt.Errorf("nested component[%d]: %w", len(c.NestedComponents), err)
+			}
 			c.NestedComponents = append(c.NestedComponents, nested)
 			// Every nested component occupies the next index in the
 			// component index space, interleaved with component imports,
@@ -352,6 +366,10 @@ func decodeComponent(buf []byte) (*Component, error) {
 	// one, and it must still fail at the same call site with the same message
 	// -- it just leaves the Component unfrozen.
 	c.typesFrozen = c.precomputeImportedAliases()
+
+	if err := c.validateValueSizes(); err != nil {
+		return nil, err
+	}
 
 	c.Decoded = true
 	c.Bytes = buf

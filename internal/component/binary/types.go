@@ -2,6 +2,7 @@ package binary
 
 import (
 	"fmt"
+	"unsafe"
 
 	"github.com/samyfodil/wazy/internal/leb128"
 )
@@ -65,6 +66,11 @@ func primName(b byte) string {
 
 // readLabel consumes an unprefixed name (used for field/param/case/flag/enum
 // labels): len:u32 followed by that many UTF-8 bytes.
+//
+// The name is a view of buf, not a copy: every buffer the decoder reads is
+// its own copy of the binary (see Decode and DecodeBytes), which nothing
+// writes after, and which the decoded Component keeps as Bytes anyway. A
+// copy per name was most of what decoding a component allocated.
 func readLabel(buf []byte, off int) (string, int, error) {
 	length, n, err := leb128.LoadUint32(buf[off:])
 	if err != nil {
@@ -74,8 +80,10 @@ func readLabel(buf []byte, off int) (string, int, error) {
 	if off+int(length) > len(buf) {
 		return "", off, ErrTruncatedBinary
 	}
-	s := string(buf[off : off+int(length)])
-	return s, off + int(length), nil
+	if length == 0 {
+		return "", off, nil
+	}
+	return unsafe.String(&buf[off], int(length)), off + int(length), nil
 }
 
 // readExternName consumes an import/export name: a 0x00/0x01 kind byte, a
@@ -227,34 +235,47 @@ func readAlias(buf []byte, off int) (int, error) {
 	}
 }
 
-// readComponentDecl consumes one componentdecl (0x03 import, else instancedecl).
+// readComponentDecl consumes one componentdecl (0x03 import, else
+// instancedecl) without retaining it.
 func readComponentDecl(buf []byte, off int) (int, error) {
+	var d ComponentDesc
+	return readComponentDeclInto(buf, off, &d)
+}
+
+// readComponentDeclInto consumes one componentdecl into d's type index
+// space: an import of a type adds a slot, as an instancedecl's export of
+// one does.
+func readComponentDeclInto(buf []byte, off int, d *ComponentDesc) (int, error) {
 	if off >= len(buf) {
 		return off, ErrTruncatedBinary
 	}
-	if buf[off] == 0x03 { // import decl
-		off++
-		_, off2, err := readExternName(buf, off)
-		if err != nil {
-			return off2, err
-		}
-		_, _, _, off2, err = readExterndesc(buf, off2)
-		return off2, err
+	if buf[off] != 0x03 { // not an import decl
+		return readInstanceDeclDescInto(buf, off, &d.Types, nil, &d.Outer)
 	}
-	return readInstanceDeclDesc(buf, off)
-}
-
-// readComponenttype consumes vec(componentdecl) (the 0x41 tag already read).
-func readComponenttype(buf []byte, off int) (int, error) {
-	count, n, err := leb128.LoadUint32(buf[off:])
+	_, off, err := readExternName(buf, off+1)
 	if err != nil {
 		return off, err
 	}
+	sort, idx, hasIdx, off, err := readExterndesc(buf, off)
+	if err == nil && sort == 0x03 {
+		addLocalType(&d.Types, &d.Outer, idx, hasIdx)
+	}
+	return off, err
+}
+
+// readComponenttypeDesc reads vec(componentdecl) (the 0x41 tag already
+// read).
+func readComponenttypeDesc(buf []byte, off int) (ComponentDesc, int, error) {
+	var d ComponentDesc
+	count, n, err := leb128.LoadUint32(buf[off:])
+	if err != nil {
+		return d, off, err
+	}
 	off += int(n)
 	for i := range count {
-		if off, err = readComponentDecl(buf, off); err != nil {
-			return off, fmt.Errorf("componentdecl[%d]: %w", i, err)
+		if off, err = readComponentDeclInto(buf, off, &d); err != nil {
+			return d, off, fmt.Errorf("componentdecl[%d]: %w", i, err)
 		}
 	}
-	return off, nil
+	return d, off, nil
 }
