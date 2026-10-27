@@ -2062,11 +2062,17 @@ func computeCanonHostFunc(
 	case binary.CanonKindWaitableSetNew:
 		def = waitableSetNewHostFunc(in)
 
-	case binary.CanonKindWaitableSetWait:
-		def = waitableSetWaitHostFunc(in, canon)
-
-	case binary.CanonKindWaitableSetPoll:
-		def = waitableSetPollHostFunc(in, canon)
+	case binary.CanonKindWaitableSetWait, binary.CanonKindWaitableSetPoll:
+		// The memory is the canon's own immediate, not a canon option.
+		memMod, merr := coreMemTarget(int(canon.MemIdx))
+		if merr != nil {
+			return hostFuncDef{}, "", fmt.Errorf("waitable-set memory %d: %w", canon.MemIdx, merr)
+		}
+		if canon.Kind == binary.CanonKindWaitableSetWait {
+			def = waitableSetWaitHostFunc(in, canon, memMod)
+		} else {
+			def = waitableSetPollHostFunc(in, canon, memMod)
+		}
 
 	case binary.CanonKindWaitableSetDrop:
 		def = waitableSetDropHostFunc(in)

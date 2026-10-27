@@ -204,10 +204,18 @@ func storeEvent(mod api.Module, builtin string, ptr uint32, ev eventTuple) event
 // it -- see task.go's requestCancellation doc); it is instead a genuinely
 // PENDING_CANCEL task whose own drive predicate below picks the
 // cancellation up at the next scheduler check.
-func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
+//
+// memMod is the module of the canon's memory option, which the event is
+// stored into; nil falls back to the calling module. The two differ once
+// several canons are packed into a regrouping shim module with no memory of
+// its own (see taskReturnHostFuncGraph).
+func waitableSetWaitHostFunc(in *Instance, canon binary.Canon, memMod api.Module) hostFuncDef {
 	in.syncTaskNeeded = true
 	cancellable := canon.Cancellable
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+		if memMod != nil {
+			mod = memMod
+		}
 		requireMayLeave(in, "waitable-set.wait")
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
@@ -264,10 +272,15 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 // instead of driving the scheduler. The poll(cancellable) prologue (~834):
 // if cancellable and a cancellation is deliverable, TASK_CANCELLED is
 // returned immediately, before even checking the set.
-func waitableSetPollHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
+//
+// memMod is waitableSetWaitHostFunc's.
+func waitableSetPollHostFunc(in *Instance, canon binary.Canon, memMod api.Module) hostFuncDef {
 	in.syncTaskNeeded = true
 	cancellable := canon.Cancellable
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+		if memMod != nil {
+			mod = memMod
+		}
 		requireMayLeave(in, "waitable-set.poll")
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
