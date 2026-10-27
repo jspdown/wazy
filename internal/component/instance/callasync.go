@@ -27,11 +27,13 @@ import (
 // the synchronous Call path is entirely unchanged -- see AsyncCall.Resolve.
 
 // asyncCompletion is one queued external import completion. cancelled selects
-// ResolveCancelled semantics over Resolve.
+// ResolveCancelled semantics over Resolve. A Loop.Post queues fn instead, with
+// no ac.
 type asyncCompletion struct {
 	ac        *AsyncCall
 	results   []abi.Value
 	cancelled bool
+	fn        func()
 }
 
 // queueExternalCompletion is the mailbox post AsyncCall.Resolve routes to while
@@ -58,6 +60,10 @@ func (in *Instance) queueExternalCompletion(c asyncCompletion) {
 // pending event so the next drive delivers it. Never reads ac.inCall (the
 // driver may differ from the goroutine that ran the host call).
 func (in *Instance) applyQueued(c asyncCompletion) error {
+	if c.fn != nil {
+		in.hostCallback(c.fn)
+		return nil
+	}
 	st := c.ac.st
 	if c.cancelled {
 		if !st.cancellationRequested {
