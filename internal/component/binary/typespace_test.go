@@ -650,7 +650,7 @@ func TestGlobalizeLocalRef_CycleGuard(t *testing.T) {
 	}
 	var c Component
 	start := uint32(0)
-	global, err := c.globalizeLocalRef(localTypes, TypeRef{TypeIndex: &start}, map[uint32]uint32{})
+	global, err := c.globalizeLocalRef(localTypes, nil, TypeRef{TypeIndex: &start}, map[uint32]uint32{})
 	if err != nil {
 		t.Fatalf("globalizeLocalRef: %v", err)
 	}
@@ -695,7 +695,7 @@ func TestGlobalizeLocalRef_HandleIsRefusedNotCarriedOver(t *testing.T) {
 			}
 			var c Component
 			start := uint32(0)
-			_, err := c.globalizeLocalRef(localTypes, TypeRef{TypeIndex: &start}, map[uint32]uint32{})
+			_, err := c.globalizeLocalRef(localTypes, nil, TypeRef{TypeIndex: &start}, map[uint32]uint32{})
 			wantErrContains(t, err, "imported instance's type declarations")
 			wantErrContains(t, err, "local type space")
 		})

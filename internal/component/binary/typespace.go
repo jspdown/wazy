@@ -434,7 +434,7 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 				// attempt that fails must not grow the table it exists to
 				// keep bounded.
 				mark := len(c.extraTypes)
-				global, gerr := c.globalizeLocalRef(instDesc.Types, exp, map[uint32]uint32{})
+				global, gerr := c.globalizeLocalRef(instDesc.Types, instDesc.Outer, exp, map[uint32]uint32{})
 				if gerr != nil {
 					c.extraTypes = c.extraTypes[:mark]
 					return nil, fmt.Errorf("type index %d: alias exports %q from instance %d: %w", idx, al.Name, al.InstanceIdx, gerr)
@@ -503,13 +503,22 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 // genuine cycle (e.g. a locally-declared resource referencing its own
 // handle) by returning the placeholder reserved for an in-progress index
 // instead of recursing forever.
-func (c *Component) globalizeLocalRef(localTypes []TypeDesc, ref TypeRef, memo map[uint32]uint32) (TypeRef, error) {
+//
+// outer maps the local types that alias a type of an enclosing type index
+// space (InstanceDesc.Outer). One level out of an imported instance's type is
+// c itself, as when an interface re-exports a type it uses from another one
+// (`use types.{error-code}`): that alias is c's own type index, as is.
+func (c *Component) globalizeLocalRef(localTypes []TypeDesc, outer map[uint32]OuterAlias, ref TypeRef, memo map[uint32]uint32) (TypeRef, error) {
 	if ref.Primitive != "" || ref.TypeIndex == nil {
 		return ref, nil
 	}
 	localIdx := *ref.TypeIndex
 	if g, ok := memo[localIdx]; ok {
 		return TypeRef{TypeIndex: &g}, nil
+	}
+	if o, ok := outer[localIdx]; ok && o.Count == 1 && int(localIdx) < len(localTypes) && localTypes[localIdx] == nil {
+		global := o.Index
+		return TypeRef{TypeIndex: &global}, nil
 	}
 	if int(localIdx) >= len(localTypes) || localTypes[localIdx] == nil {
 		return TypeRef{}, fmt.Errorf("local type index %d is out of range, or was not resolved structurally by this decoder (an abstract resource export, or a type-sort alias)", localIdx)
@@ -518,7 +527,7 @@ func (c *Component) globalizeLocalRef(localTypes []TypeDesc, ref TypeRef, memo m
 	// self-referential local type terminates instead of looping forever.
 	global := c.internExtraType(nil)
 	memo[localIdx] = global
-	rewritten, err := c.globalizeLocalTypeDesc(localTypes, localTypes[localIdx], memo)
+	rewritten, err := c.globalizeLocalTypeDesc(localTypes, outer, localTypes[localIdx], memo)
 	if err != nil {
 		return TypeRef{}, err
 	}
@@ -531,31 +540,31 @@ func (c *Component) globalizeLocalRef(localTypes []TypeDesc, ref TypeRef, memo m
 // globalizeLocalRef, returning an equivalent TypeDesc whose own TypeRefs are
 // all either primitives or Component.extraTypes indices -- safe to embed in a
 // TypeDesc handed to an ordinary caller of this Component's Resolver.
-func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, memo map[uint32]uint32) (TypeDesc, error) {
+func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, outer map[uint32]OuterAlias, d TypeDesc, memo map[uint32]uint32) (TypeDesc, error) {
 	switch t := d.(type) {
 	case PrimitiveDesc, FlagsDesc, EnumDesc:
 		return d, nil
 
 	case ListDesc:
-		elem, err := c.globalizeLocalRef(localTypes, t.Element, memo)
+		elem, err := c.globalizeLocalRef(localTypes, outer, t.Element, memo)
 		if err != nil {
 			return nil, err
 		}
 		return ListDesc{Element: elem}, nil
 
 	case FixedListDesc:
-		elem, err := c.globalizeLocalRef(localTypes, t.Element, memo)
+		elem, err := c.globalizeLocalRef(localTypes, outer, t.Element, memo)
 		if err != nil {
 			return nil, err
 		}
 		return FixedListDesc{Element: elem, Length: t.Length}, nil
 
 	case MapDesc:
-		key, err := c.globalizeLocalRef(localTypes, t.Key, memo)
+		key, err := c.globalizeLocalRef(localTypes, outer, t.Key, memo)
 		if err != nil {
 			return nil, err
 		}
-		val, err := c.globalizeLocalRef(localTypes, t.Value, memo)
+		val, err := c.globalizeLocalRef(localTypes, outer, t.Value, memo)
 		if err != nil {
 			return nil, err
 		}
@@ -564,7 +573,7 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 	case RecordDesc:
 		fields := make([]RecordField, len(t.Fields))
 		for i, f := range t.Fields {
-			ft, err := c.globalizeLocalRef(localTypes, f.Type, memo)
+			ft, err := c.globalizeLocalRef(localTypes, outer, f.Type, memo)
 			if err != nil {
 				return nil, err
 			}
@@ -575,7 +584,7 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 	case TupleDesc:
 		elems := make([]TypeRef, len(t.Elements))
 		for i, e := range t.Elements {
-			er, err := c.globalizeLocalRef(localTypes, e, memo)
+			er, err := c.globalizeLocalRef(localTypes, outer, e, memo)
 			if err != nil {
 				return nil, err
 			}
@@ -588,7 +597,7 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 		for i, cs := range t.Cases {
 			nc := VariantCase{Name: cs.Name}
 			if cs.Type != nil {
-				ct, err := c.globalizeLocalRef(localTypes, *cs.Type, memo)
+				ct, err := c.globalizeLocalRef(localTypes, outer, *cs.Type, memo)
 				if err != nil {
 					return nil, err
 				}
@@ -599,7 +608,7 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 		return VariantDesc{Cases: cases}, nil
 
 	case OptionDesc:
-		elem, err := c.globalizeLocalRef(localTypes, t.Element, memo)
+		elem, err := c.globalizeLocalRef(localTypes, outer, t.Element, memo)
 		if err != nil {
 			return nil, err
 		}
@@ -608,14 +617,14 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 	case ResultDesc:
 		nr := ResultDesc{}
 		if t.Ok != nil {
-			ok, err := c.globalizeLocalRef(localTypes, *t.Ok, memo)
+			ok, err := c.globalizeLocalRef(localTypes, outer, *t.Ok, memo)
 			if err != nil {
 				return nil, err
 			}
 			nr.Ok = &ok
 		}
 		if t.Err != nil {
-			er, err := c.globalizeLocalRef(localTypes, *t.Err, memo)
+			er, err := c.globalizeLocalRef(localTypes, outer, *t.Err, memo)
 			if err != nil {
 				return nil, err
 			}
@@ -626,7 +635,7 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 	case StreamDesc:
 		ns := StreamDesc{}
 		if t.Element != nil {
-			el, err := c.globalizeLocalRef(localTypes, *t.Element, memo)
+			el, err := c.globalizeLocalRef(localTypes, outer, *t.Element, memo)
 			if err != nil {
 				return nil, err
 			}
@@ -637,7 +646,7 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 	case FutureDesc:
 		nf := FutureDesc{}
 		if t.Element != nil {
-			el, err := c.globalizeLocalRef(localTypes, *t.Element, memo)
+			el, err := c.globalizeLocalRef(localTypes, outer, *t.Element, memo)
 			if err != nil {
 				return nil, err
 			}
