@@ -76,6 +76,11 @@ type guestBuffer struct {
 	// element), so those keep today's exact byte-for-byte behavior.
 	ownElem *binary.OwnDesc
 
+	// nestedOwn is true when elem holds an own<R> below its top level, as
+	// result<option<own<R>>, E> does: read/write transfer each one like
+	// ownElem's, walking the value.
+	nestedOwn bool
+
 	ptr      uint32 // advances elemSz per element copied
 	length   uint32
 	progress uint32
@@ -111,7 +116,8 @@ func newGuestBuffer(inst *Instance, memMod api.Module, realloc abi.Realloc, reso
 	if od, ok := elem.(binary.OwnDesc); ok {
 		ownElem = &od
 	}
-	return &guestBuffer{memMod: memMod, realloc: realloc, resolve: resolve, elem: elem, elemSz: elemSz, numeric: numeric, inst: inst, ownElem: ownElem, ptr: ptr, length: length}, nil
+	nestedOwn := elem != nil && typeContainsNested(elem, resolve, 0, isOwnType)
+	return &guestBuffer{memMod: memMod, realloc: realloc, resolve: resolve, elem: elem, elemSz: elemSz, numeric: numeric, inst: inst, ownElem: ownElem, nestedOwn: nestedOwn, ptr: ptr, length: length}, nil
 }
 
 func (b *guestBuffer) remain() uint32     { return b.length - b.progress }
@@ -157,6 +163,15 @@ func (b *guestBuffer) read(n uint32) ([]abi.Value, error) {
 			}
 			v = rep
 		}
+		if b.nestedOwn {
+			var terr error
+			v, terr = mapOwns(b.elem, b.resolve, v, 0, func(rt, h uint32) (uint32, error) {
+				return b.inst.resources.TakeOwn(b.inst.canonTag(rt), h)
+			})
+			if terr != nil {
+				return nil, fmt.Errorf("stream/future buffer read: element %d: %w", i, terr)
+			}
+		}
 		out[i] = v
 		b.ptr += b.elemSz
 	}
@@ -193,6 +208,13 @@ func (b *guestBuffer) write(vs []abi.Value) error {
 				return fmt.Errorf("stream/future buffer write: element %d: own<%d>: expected a uint32 rep, got %T", i, b.ownElem.ResourceType, v)
 			}
 			v = b.inst.resources.NewOwn(b.inst.canonTag(b.ownElem.ResourceType), rep)
+		}
+		if b.nestedOwn {
+			if v, err = mapOwns(b.elem, b.resolve, v, 0, func(rt, rep uint32) (uint32, error) {
+				return b.inst.resources.NewOwn(b.inst.canonTag(rt), rep), nil
+			}); err != nil {
+				return fmt.Errorf("stream/future buffer write: element %d: %w", i, err)
+			}
 		}
 		// Rebind mem from the store: an element with an indirect payload
 		// (string, list, a record containing one) allocates, and an allocation
@@ -283,6 +305,12 @@ type sharedStream struct {
 	// $Consumer imports the stream's readable end under its own local type
 	// index for $R.
 	elemIn *Instance
+
+	// hostTyped marks a host-created stream whose elem is relative to the
+	// host's own type table (NewStreamOf): it cannot be compared with a
+	// component's element type, so the element type checks skip it and the
+	// guest's canon type governs every copy.
+	hostTyped bool
 
 	dropped bool
 
@@ -642,6 +670,9 @@ type sharedFuture struct {
 	// elemIn is sharedStream.elemIn's twin -- see its doc.
 	elemIn *Instance
 
+	// hostTyped is sharedStream.hostTyped's twin -- see its doc.
+	hostTyped bool
+
 	dropped           bool
 	pendingInst       *Instance
 	pendingBuffer     copyBuffer
@@ -749,7 +780,7 @@ func peekReadableStreamEnd(in *Instance, t *handleTable, elemDesc binary.TypeDes
 	if se.side != sideReadable {
 		return nil, fmt.Errorf("handle %d is not a READABLE stream end", i)
 	}
-	if !elemTypesCompatible(se.shared.elemIn, se.shared.elem, in, elemDesc) {
+	if !se.shared.hostTyped && !elemTypesCompatible(se.shared.elemIn, se.shared.elem, in, elemDesc) {
 		return nil, fmt.Errorf("handle %d: stream element type mismatch", i)
 	}
 	if se.state != copyIdle {
@@ -787,7 +818,7 @@ func peekReadableFutureEnd(in *Instance, t *handleTable, elemDesc binary.TypeDes
 	if fe.side != sideReadable {
 		return nil, fmt.Errorf("handle %d is not a READABLE future end", i)
 	}
-	if !elemTypesCompatible(fe.shared.elemIn, fe.shared.elem, in, elemDesc) {
+	if !fe.shared.hostTyped && !elemTypesCompatible(fe.shared.elemIn, fe.shared.elem, in, elemDesc) {
 		return nil, fmt.Errorf("handle %d: future element type mismatch", i)
 	}
 	if fe.state != copyIdle {

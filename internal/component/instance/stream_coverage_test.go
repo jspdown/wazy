@@ -3,6 +3,7 @@ package instance
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
@@ -631,10 +632,9 @@ func TestResolveStreamOrFutureElem_BorrowRefused(t *testing.T) {
 	})
 }
 
-// TestResolveStreamOrFutureElem_NestedOwnRefused: own<T> below the TOP
-// LEVEL (e.g. a record field) is still a real, documented deferral -- this
-// milestone's per-element transfer only walks the top-level value.
-func TestResolveStreamOrFutureElem_NestedOwnRefused(t *testing.T) {
+// TestResolveStreamOrFutureElem_NestedOwnAccepted: own<T> below the TOP
+// LEVEL (e.g. a record field) is transferred by walking the element value.
+func TestResolveStreamOrFutureElem_NestedOwnAccepted(t *testing.T) {
 	recRef := binary.TypeRef{TypeIndex: uintPtr(0)}
 	comp := &binary.Component{Types: []binary.Type{
 		{Kind: "stream", Descriptor: binary.StreamDesc{Element: &recRef}},
@@ -649,8 +649,42 @@ func TestResolveStreamOrFutureElem_NestedOwnRefused(t *testing.T) {
 		}
 		return nil
 	}
-	if _, _, _, _, err := resolveStreamOrFutureElem(comp, resolve, false, 0); err == nil {
-		t.Fatal("expected refusal: own<T> nested inside a stream element record field")
+	if _, _, _, _, err := resolveStreamOrFutureElem(comp, resolve, false, 0); err != nil {
+		t.Fatalf("own<T> nested inside a stream element record field: %v", err)
+	}
+}
+
+// TestMapOwns: every own<T> in a value is mapped, at any depth, and nothing
+// else is touched.
+func TestMapOwns(t *testing.T) {
+	own := binary.TypeRef{TypeIndex: uintPtr(1)}
+	resolve := func(idx uint32) binary.TypeDesc {
+		switch idx {
+		case 0:
+			return binary.OptionDesc{Element: own}
+		case 1:
+			return binary.OwnDesc{ResourceType: 7}
+		case 2:
+			return binary.TupleDesc{Elements: []binary.TypeRef{{Primitive: "u32"}, {TypeIndex: uintPtr(0)}}}
+		}
+		return nil
+	}
+	errRef := binary.TypeRef{Primitive: "string"}
+	okRef := binary.TypeRef{TypeIndex: uintPtr(2)}
+	rt := binary.ResultDesc{Ok: &okRef, Err: &errRef}
+
+	got, err := mapOwns(rt, resolve, abi.ResultValue{Payload: []abi.Value{uint32(5), uint32(3)}}, 0, func(tag, x uint32) (uint32, error) {
+		if tag != 7 {
+			t.Fatalf("resource type %d, want 7", tag)
+		}
+		return x * 10, nil
+	})
+	if err != nil {
+		t.Fatalf("mapOwns: %v", err)
+	}
+	want := abi.ResultValue{Payload: []abi.Value{uint32(5), uint32(30)}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mapOwns = %#v, want %#v", got, want)
 	}
 }
 

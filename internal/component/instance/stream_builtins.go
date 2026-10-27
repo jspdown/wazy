@@ -182,21 +182,15 @@ func resolveStreamOrFutureElem(comp *binary.Component, resolve abi.Resolver, isF
 	if err != nil {
 		return nil, 0, 0, false, fmt.Errorf("element type: %w", err)
 	}
-	// Feature 3 (docs/component-model-async-final3-fable.md §3.2): a
-	// TOP-LEVEL own<R> element is allowed -- the per-element transfer below
-	// (guestBuffer.read/write) mints/takes it in the writer's/reader's own
+	// Feature 3 (docs/component-model-async-final3-fable.md §3.2): an own<R>
+	// anywhere in the element is allowed -- the per-element transfer
+	// (guestBuffer.read/write) takes/mints it in the writer's/reader's own
 	// handle table at rendezvous time, exactly the reference's Buffer
 	// lift/lower semantics. A borrow anywhere is still rejected (spec:
 	// invalid in a stream/future element type, its scoped lifetime can't
-	// survive an async, unbounded-duration transfer). own at depth > 0
-	// (e.g. stream<record{own R}>) is still rejected too -- a real,
-	// documented deferral: this milestone's transfer only walks the
-	// TOP-LEVEL value, not arbitrary nested own leaves.
+	// survive an async, unbounded-duration transfer).
 	if elemContainsBorrowHandle(elem, resolve, 0) {
 		return nil, 0, 0, false, fmt.Errorf("stream/future element type contains a borrow handle, which the component-model spec disallows")
-	}
-	if _, isOwn := elem.(binary.OwnDesc); !isOwn && elemContainsResourceHandle(elem, resolve, 0) {
-		return nil, 0, 0, false, fmt.Errorf("stream/future element type contains an own/borrow resource handle, which is not supported by this milestone")
 	}
 	elemSz, err = abi.Size(elem, resolve)
 	if err != nil {
@@ -337,7 +331,7 @@ func requireStreamEnd(in *Instance, name string, i uint32, side endSide, elemDes
 	if se.side != side {
 		panic(fmt.Errorf("component/instance: %s: handle %d is not a %s stream end", name, i, sideName(side)))
 	}
-	if !elemTypesCompatible(se.shared.elemIn, se.shared.elem, in, elemDesc) {
+	if !se.shared.hostTyped && !elemTypesCompatible(se.shared.elemIn, se.shared.elem, in, elemDesc) {
 		panic(fmt.Errorf("component/instance: %s: handle %d: stream element type mismatch", name, i))
 	}
 	return se
@@ -353,7 +347,7 @@ func requireFutureEnd(in *Instance, name string, i uint32, side endSide, elemDes
 	if fe.side != side {
 		panic(fmt.Errorf("component/instance: %s: handle %d is not a %s future end", name, i, sideName(side)))
 	}
-	if !elemTypesCompatible(fe.shared.elemIn, fe.shared.elem, in, elemDesc) {
+	if !fe.shared.hostTyped && !elemTypesCompatible(fe.shared.elemIn, fe.shared.elem, in, elemDesc) {
 		panic(fmt.Errorf("component/instance: %s: handle %d: future element type mismatch", name, i))
 	}
 	return fe

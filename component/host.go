@@ -35,6 +35,12 @@ func WithImportCustom(iface, name string, fn HostFunc, fd FuncDesc, resolve Reso
 	return instance.WithImportCustom(iface, name, fn, fd, resolve)
 }
 
+// WithAsyncImportCustom is WithAsyncImport with a hand-built signature, as
+// WithImportCustom is WithImport's.
+func WithAsyncImportCustom(iface, name string, fn AsyncHostFunc, fd FuncDesc, resolve Resolver) Option {
+	return instance.WithAsyncImportCustom(iface, name, fn, fd, resolve)
+}
+
 // WithResourceTag declares that the resource `name`, exported by the imported
 // interface `iface`, is the one this host tags as `tag` when minting handles.
 //
@@ -74,6 +80,13 @@ func WithHostResourceDtor(tag uint32, fn func(ctx context.Context, rep uint32) e
 func WithHostState(key, value any) Option {
 	return instance.WithHostState(key, value)
 }
+
+// OwnedRep is a host rep for an own<R> or borrow<R> nested inside a host
+// import's composite result, such as `result<own<R>, E>`: the engine mints the
+// guest's handle for it when the result is lowered, on the driving goroutine,
+// so an AsyncCall may Resolve with one from any goroutine. See
+// instance.OwnedRep.
+type OwnedRep = instance.OwnedRep
 
 // InstanceExports is re-exported on Instance itself; see
 // instance.Instance.InstanceExports. Listed here so the host-implementation

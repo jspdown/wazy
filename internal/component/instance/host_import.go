@@ -967,6 +967,19 @@ type hostParamPlan struct {
 	usesMem  bool
 	isBorrow bool
 	borrowRT uint32 // valid when isBorrow
+	// asyncValues is true when pt holds a stream or future at any depth (see
+	// host_async_values.go).
+	asyncValues bool
+}
+
+// resolveArg turns a lifted argument into what the HostFunc receives: a
+// stream/future handle at any depth becomes the host end that takes it over,
+// a top-level own/borrow handle becomes its rep.
+func (pp *hostParamPlan) resolveArg(in *Instance, resources *handleTable, resolve abi.Resolver, v abi.Value) (abi.Value, error) {
+	if pp.asyncValues {
+		return liftHostArgAsyncValues(in, resources, pp.pt, resolve, v, 0)
+	}
+	return resolveHandleArg(in, resources, nil, pp.pt, v)
 }
 
 // buildHostParamPlans precomputes the per-param lift plan for fd. Errors
@@ -979,14 +992,15 @@ func buildHostParamPlans(fd binary.FuncDesc, resolve abi.Resolver) ([]hostParamP
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}
-		if typeContainsAsyncValueNested(pt, resolve, 0) {
-			return nil, fmt.Errorf("param %d: stream/future/error-context nested inside a composite type is not supported by this milestone", i)
+		asyncValues, err := hostAsyncValues(pt, resolve)
+		if err != nil {
+			return nil, fmt.Errorf("param %d: %w", i, err)
 		}
 		flat, err := abi.Flatten(pt, resolve)
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}
-		pp := hostParamPlan{pt: pt, flat: flat, usesMem: usesMemory(pt, resolve)}
+		pp := hostParamPlan{pt: pt, flat: flat, usesMem: usesMemory(pt, resolve), asyncValues: asyncValues}
 		if bd, ok := pt.(binary.BorrowDesc); ok {
 			pp.isBorrow, pp.borrowRT = true, bd.ResourceType
 		}
@@ -1052,7 +1066,7 @@ func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolv
 				}
 			}
 		}
-		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
+		v, err = pp.resolveArg(in, resources, resolve, v)
 		if err != nil {
 			return nil, lent, fmt.Errorf("param %d: %w", i, err)
 		}
@@ -1102,7 +1116,7 @@ func liftHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.T
 				}
 			}
 		}
-		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
+		v, err = pp.resolveArg(in, resources, resolve, v)
 		if err != nil {
 			return nil, lent, fmt.Errorf("param %d: %w", i, err)
 		}
@@ -1333,6 +1347,21 @@ type hostResultPlan struct {
 	// with the type's alignment and size resolved here instead of on every
 	// call. Valid when count == 1.
 	store abi.StoreStep
+	// walk is true when rt holds a stream or future at any depth, or an
+	// own/borrow below the top level (see host_async_values.go). Valid when
+	// count == 1.
+	walk    bool
+	resolve abi.Resolver
+}
+
+// allocResult turns a HostFunc's result into the value lowered for the guest:
+// a stream/future at any depth gets a fresh readable-end handle, a top-level
+// own/borrow rep or a nested OwnedRep gets a fresh handle.
+func (p *hostResultPlan) allocResult(resources *handleTable, v abi.Value) (abi.Value, error) {
+	if p.walk {
+		return allocHostResultAsyncValues(resources, p.rt, p.resolve, v, 0)
+	}
+	return allocHandleResult(resources, p.rt, v)
 }
 
 // buildHostResultPlan precomputes the result-lower facts for fd. A count of
@@ -1348,8 +1377,9 @@ func buildHostResultPlan(fd binary.FuncDesc, resolve abi.Resolver) (hostResultPl
 	if err != nil {
 		return plan, fmt.Errorf("result: %w", err)
 	}
-	if typeContainsAsyncValueNested(rt, resolve, 0) {
-		return plan, fmt.Errorf("result: stream/future/error-context nested inside a composite type is not supported by this milestone")
+	asyncValues, err := hostAsyncValues(rt, resolve)
+	if err != nil {
+		return plan, fmt.Errorf("result: %w", err)
 	}
 	step, err := abi.CompileLower(rt, resolve)
 	if err != nil {
@@ -1360,6 +1390,8 @@ func buildHostResultPlan(fd binary.FuncDesc, resolve abi.Resolver) (hostResultPl
 		return plan, fmt.Errorf("result: %w", err)
 	}
 	plan.rt, plan.usesMem, plan.step, plan.store = rt, usesMemory(rt, resolve), step, storeStep
+	plan.walk = asyncValues || typeContainsNested(rt, resolve, 0, isHandleType)
+	plan.resolve = resolve
 	return plan, nil
 }
 
@@ -1381,7 +1413,7 @@ func lowerHostResultsPlanned(ctx context.Context, plan hostResultPlan, results [
 	if plan.usesMem && !memAvailable {
 		return fmt.Errorf("result requires linear memory (string/list), but the calling module has none")
 	}
-	resultVal, err := allocHandleResult(resources, plan.rt, results[0])
+	resultVal, err := plan.allocResult(resources, results[0])
 	if err != nil {
 		return fmt.Errorf("result: %w", err)
 	}

@@ -927,63 +927,89 @@ func typeRefContainsResource(ref *binary.TypeRef, resolve abi.Resolver, depth in
 // result, so a bound export/import's param or result type may carry a
 // stream/future/error-context only at its own top level (depth == 0).
 func typeContainsAsyncValueNested(t binary.TypeDesc, resolve abi.Resolver, depth int) bool {
+	return typeContainsNested(t, resolve, depth, isAsyncValueType)
+}
+
+// isAsyncValueType reports whether t is a stream, a future or an
+// error-context.
+func isAsyncValueType(t binary.TypeDesc) bool {
+	switch d := t.(type) {
+	case binary.StreamDesc, binary.FutureDesc:
+		return true
+	case binary.PrimitiveDesc:
+		return d.Prim == "error-context"
+	}
+	return false
+}
+
+// isStreamOrFutureType reports whether t is a stream or a future.
+func isStreamOrFutureType(t binary.TypeDesc) bool {
+	switch t.(type) {
+	case binary.StreamDesc, binary.FutureDesc:
+		return true
+	}
+	return false
+}
+
+// isErrorContextType reports whether t is an error-context.
+func isErrorContextType(t binary.TypeDesc) bool {
+	p, ok := t.(binary.PrimitiveDesc)
+	return ok && p.Prim == "error-context"
+}
+
+// typeContainsNested reports whether t contains a type match accepts STRICTLY
+// BELOW the top level.
+func typeContainsNested(t binary.TypeDesc, resolve abi.Resolver, depth int, match func(binary.TypeDesc) bool) bool {
 	if depth > maxResourceWalkDepth {
 		return false
 	}
-	if depth > 0 {
-		switch d := t.(type) {
-		case binary.StreamDesc, binary.FutureDesc:
-			return true
-		case binary.PrimitiveDesc:
-			if d.Prim == "error-context" {
-				return true
-			}
-		}
+	if depth > 0 && match(t) {
+		return true
 	}
 	switch d := t.(type) {
 	case binary.ListDesc:
-		return typeRefContainsAsyncValueNested(&d.Element, resolve, depth)
+		return typeRefContainsNested(&d.Element, resolve, depth, match)
 	case binary.FixedListDesc:
-		return typeRefContainsAsyncValueNested(&d.Element, resolve, depth)
+		return typeRefContainsNested(&d.Element, resolve, depth, match)
 	case binary.MapDesc:
-		return typeRefContainsAsyncValueNested(&d.Key, resolve, depth) || typeRefContainsAsyncValueNested(&d.Value, resolve, depth)
+		return typeRefContainsNested(&d.Key, resolve, depth, match) || typeRefContainsNested(&d.Value, resolve, depth, match)
 	case binary.OptionDesc:
-		return typeRefContainsAsyncValueNested(&d.Element, resolve, depth)
+		return typeRefContainsNested(&d.Element, resolve, depth, match)
 	case binary.RecordDesc:
 		for i := range d.Fields {
-			if typeRefContainsAsyncValueNested(&d.Fields[i].Type, resolve, depth) {
+			if typeRefContainsNested(&d.Fields[i].Type, resolve, depth, match) {
 				return true
 			}
 		}
 	case binary.TupleDesc:
 		for i := range d.Elements {
-			if typeRefContainsAsyncValueNested(&d.Elements[i], resolve, depth) {
+			if typeRefContainsNested(&d.Elements[i], resolve, depth, match) {
 				return true
 			}
 		}
 	case binary.VariantDesc:
 		for i := range d.Cases {
-			if d.Cases[i].Type != nil && typeRefContainsAsyncValueNested(d.Cases[i].Type, resolve, depth) {
+			if d.Cases[i].Type != nil && typeRefContainsNested(d.Cases[i].Type, resolve, depth, match) {
 				return true
 			}
 		}
 	case binary.ResultDesc:
-		if d.Ok != nil && typeRefContainsAsyncValueNested(d.Ok, resolve, depth) {
+		if d.Ok != nil && typeRefContainsNested(d.Ok, resolve, depth, match) {
 			return true
 		}
-		if d.Err != nil && typeRefContainsAsyncValueNested(d.Err, resolve, depth) {
+		if d.Err != nil && typeRefContainsNested(d.Err, resolve, depth, match) {
 			return true
 		}
 	}
 	return false
 }
 
-func typeRefContainsAsyncValueNested(ref *binary.TypeRef, resolve abi.Resolver, depth int) bool {
+func typeRefContainsNested(ref *binary.TypeRef, resolve abi.Resolver, depth int, match func(binary.TypeDesc) bool) bool {
 	t, err := resolveTypeRef(ref, resolve)
 	if err != nil {
 		return false
 	}
-	return typeContainsAsyncValueNested(t, resolve, depth+1)
+	return typeContainsNested(t, resolve, depth+1, match)
 }
 
 // resolveArgHandles walks an argument value against its type and replaces every

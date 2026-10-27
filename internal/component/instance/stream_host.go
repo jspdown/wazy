@@ -37,6 +37,23 @@ func (in *Instance) requireSchedulable(op string) {
 	}
 }
 
+// hostCallback runs fn, a host end's completion callback, counted as a host
+// call. Completion always runs on the driving goroutine -- inside the host op
+// itself, or inside the guest builtin that rendezvoused with a parked host
+// buffer -- so the callback may issue the end's next op (Write the next chunk,
+// re-arm a Read). Without the bracket, requireSchedulable rejects that op
+// whenever the guest builtin runs outside a scheduler thunk, as it does during
+// an async export's first segment.
+func (in *Instance) hostCallback(fn func()) {
+	if in == nil {
+		fn()
+		return
+	}
+	in.inHostCall++
+	defer func() { in.inHostCall-- }()
+	fn()
+}
+
 // StreamWriter is the host-held writable end of a stream whose readable end
 // lives (or will live) in a guest table. NOT a table entry, NOT a waitable:
 // completion surfaces as Go callbacks, not events.
@@ -118,6 +135,46 @@ func (in *Instance) NewFuture(elem binary.TypeDesc) (*FutureWriter, abi.Value, e
 	return &FutureWriter{in: in, shared: shared, state: copyIdle}, shared, nil
 }
 
+// NewStreamOf is NewStream for an element type built in the host's own type
+// table, whose type indices resolve resolves -- a composite element such as a
+// record, or one holding a resource. The element type is never compared with
+// the component's: the guest's canon type governs every copy. An own<R>
+// anywhere in an element is a rep: the reading guest gets a fresh handle for
+// it, and a host reading a guest's stream receives the rep.
+func (in *Instance) NewStreamOf(elem binary.TypeDesc, resolve abi.Resolver) (*StreamWriter, abi.Value, error) {
+	elemSz, align, numeric, err := resolveHostElem(resolve, elem)
+	if err != nil {
+		return nil, nil, err
+	}
+	shared := &sharedStream{elem: elem, elemSz: elemSz, align: align, numeric: numeric, hostTyped: true}
+	return &StreamWriter{in: in, shared: shared, state: copyIdle}, shared, nil
+}
+
+// NewFutureOf is NewStreamOf's future twin.
+func (in *Instance) NewFutureOf(elem binary.TypeDesc, resolve abi.Resolver) (*FutureWriter, abi.Value, error) {
+	elemSz, align, numeric, err := resolveHostElem(resolve, elem)
+	if err != nil {
+		return nil, nil, err
+	}
+	shared := &sharedFuture{elem: elem, elemSz: elemSz, align: align, numeric: numeric, hostTyped: true}
+	return &FutureWriter{in: in, shared: shared, state: copyIdle}, shared, nil
+}
+
+// resolveHostElem is resolveNewElem for a host-typed element: resource handles
+// are allowed, see NewStreamOf.
+func resolveHostElem(resolve abi.Resolver, elem binary.TypeDesc) (elemSz, align uint32, numeric bool, err error) {
+	if elem == nil {
+		return 0, 0, true, nil
+	}
+	if elemSz, err = abi.Size(elem, resolve); err != nil {
+		return 0, 0, false, fmt.Errorf("element size: %w", err)
+	}
+	if align, err = abi.Alignment(elem, resolve); err != nil {
+		return 0, 0, false, fmt.Errorf("element alignment: %w", err)
+	}
+	return elemSz, align, noneOrNumberType(elem), nil
+}
+
 func (w *StreamWriter) copying() bool { return w.state == copyCopying || w.state == copyCancelling }
 
 // Write offers vals to the stream. onDone fires EXACTLY ONCE with the result
@@ -142,7 +199,7 @@ func (w *StreamWriter) Write(vals []abi.Value, onDone func(res CopyResult, n uin
 		if res == copyDropped {
 			w.state = copyDone
 		}
-		onDone(CopyResult(res), buf.progressed())
+		w.in.hostCallback(func() { onDone(CopyResult(res), buf.progressed()) })
 	}
 	// onCopy fires only if THIS Write itself parked (no reader was ready
 	// yet) and a LATER guest/host read drains our buffer -- reclaim
@@ -199,7 +256,7 @@ func (r *StreamReader) Read(n uint32, onDone func(res CopyResult, vals []abi.Val
 		if res == copyDropped {
 			r.state = copyDone
 		}
-		onDone(CopyResult(res), buf.vals)
+		r.in.hostCallback(func() { onDone(CopyResult(res), buf.vals) })
 	}
 	// See StreamWriter.Write's onCopy doc: reclaim-then-fire inline is the
 	// host end's delivery step.
@@ -247,7 +304,7 @@ func (w *FutureWriter) Set(v abi.Value, onDone func(res CopyResult)) {
 	w.state = copyCopying
 	err := w.shared.write(nil, buf, func(res copyResult) {
 		w.state = copyDone // a future is one-shot: completed or dropped, both terminal
-		onDone(CopyResult(res))
+		w.in.hostCallback(func() { onDone(CopyResult(res)) })
 	})
 	if err != nil {
 		panic(fmt.Errorf("component/instance: FutureWriter.Set: %w", err))
@@ -280,7 +337,7 @@ func (r *FutureReader) Get(onDone func(res CopyResult, v abi.Value)) {
 		if len(buf.vals) == 1 {
 			v = buf.vals[0]
 		}
-		onDone(CopyResult(res), v)
+		r.in.hostCallback(func() { onDone(CopyResult(res), v) })
 	})
 	if err != nil {
 		panic(fmt.Errorf("component/instance: FutureReader.Get: %w", err))

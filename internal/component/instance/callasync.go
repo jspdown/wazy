@@ -114,6 +114,21 @@ func (p *PendingCall) Done() <-chan struct{} { return p.done }
 // Milestone limits: one outstanding CallAsync per Instance; the export must be
 // an async (callback) lift.
 func (in *Instance) CallAsync(ctx context.Context, export string, args ...abi.Value) (*PendingCall, error) {
+	return in.callAsync(ctx, export, nil, args)
+}
+
+// CallAsyncOnReturn is CallAsync, also calling onReturn with the export's
+// result as soon as the export calls task.return. The task may keep running
+// after that -- an export that returns a stream typically writes it from a task
+// it spawned -- so Await, which returns when the task exits, is too late for a
+// host that must read that stream to let the task finish. onReturn runs on the
+// driving goroutine, counted as a host call: it may take handles out of the
+// instance's table and drive host stream/future ends.
+func (in *Instance) CallAsyncOnReturn(ctx context.Context, export string, onReturn func(result []abi.Value), args ...abi.Value) (*PendingCall, error) {
+	return in.callAsync(ctx, export, onReturn, args)
+}
+
+func (in *Instance) callAsync(ctx context.Context, export string, onReturn func(result []abi.Value), args []abi.Value) (*PendingCall, error) {
 	be, ok := in.exports[export]
 	if !ok {
 		return nil, fmt.Errorf("component/instance: export %q not found", export)
@@ -137,6 +152,14 @@ func (in *Instance) CallAsync(ctx context.Context, export string, args ...abi.Va
 	gt.t, gt.in, gt.be, gt.ctx, gt.exportName = t, in, be, ctx, export
 	gt.args = args
 	t.gt = gt
+	if onReturn != nil {
+		t.onResolve = func(vals []abi.Value, cancelled bool) {
+			t.result, t.cancelled = vals, cancelled
+			if !cancelled {
+				in.hostCallback(func() { onReturn(vals) })
+			}
+		}
+	}
 
 	p := &PendingCall{in: in, gt: gt, t: t, name: export, done: make(chan struct{})}
 	in.amu.Lock()

@@ -194,6 +194,7 @@ type asyncResolveCfg struct {
 	iface, funcName string
 	resultCount     int
 	resultType      binary.TypeDesc
+	resultPlan      hostResultPlan
 	resultStore     abi.StoreStep
 	resultUsesMem   bool
 	resources       *handleTable
@@ -225,7 +226,7 @@ func (st *subtask) applyResolve(vals []abi.Value) error {
 	if cfg.resultUsesMem && !memAvailable {
 		return fmt.Errorf("async import %q %q: result requires linear memory (string/list), but the calling module has none", cfg.iface, cfg.funcName)
 	}
-	resultVal, herr := allocHandleResult(cfg.resources, cfg.resultType, vals[0])
+	resultVal, herr := cfg.resultPlan.allocResult(cfg.resources, vals[0])
 	if herr != nil {
 		return fmt.Errorf("async import %q %q: result: %w", cfg.iface, cfg.funcName, herr)
 	}
@@ -271,6 +272,15 @@ type AsyncHostFunc func(ctx context.Context, args []abi.Value, call *AsyncCall) 
 func WithAsyncImport(iface, name string, fn AsyncHostFunc, params, results []binary.TypeDesc) Option {
 	return func(c *config) {
 		c.imports[mkImportKey(iface, name)] = &hostImport{asyncFn: fn, params: params, results: results}
+	}
+}
+
+// WithAsyncImportCustom is WithAsyncImport with a hand-built signature, as
+// WithImportCustom is WithImport's: the only form that can express a nested
+// composite such as `result<own<R>, E>`.
+func WithAsyncImportCustom(iface, name string, fn AsyncHostFunc, fd binary.FuncDesc, resolve abi.Resolver) Option {
+	return func(c *config) {
+		c.imports[mkImportKey(iface, name)] = &hostImport{asyncFn: fn, customFD: &fd, customResolve: resolve}
 	}
 }
 
@@ -355,7 +365,7 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 	// see asyncResolveCfg's doc and subtask.applyResolve (this file).
 	cfg := &asyncResolveCfg{
 		iface: iface, funcName: funcName,
-		resultCount: resultCount, resultType: resultType, resultStore: resultPlan.store, resultUsesMem: resultUsesMem,
+		resultCount: resultCount, resultType: resultType, resultPlan: resultPlan, resultStore: resultPlan.store, resultUsesMem: resultUsesMem,
 		resources: resources, reallocOverride: reallocOverride,
 	}
 
@@ -570,7 +580,7 @@ func liftAsyncHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc bin
 				}
 			}
 		}
-		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
+		v, err = pp.resolveArg(in, resources, resolve, v)
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}
@@ -619,7 +629,7 @@ func liftAsyncHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.R
 				}
 			}
 		}
-		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
+		v, err = pp.resolveArg(in, resources, resolve, v)
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}
